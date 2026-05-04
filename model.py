@@ -16,7 +16,7 @@ class CausalSelfAttention(nn.Module):
         
         self.register_buffer(
             'mask',
-            torch.tril(torch.ones(config.context_len, config.context_len).view(1, 1, config.context_len, config.context_len))
+            torch.tril(torch.ones(config.block_size, config.block_size).view(1, 1, config.block_size, config.block_size))
         )
 
         self.Wq = nn.Linear(self.d_model, self.head_num*self.d_head, bias=False)
