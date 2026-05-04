@@ -37,3 +37,17 @@ class CausalSelfAttention(nn.Module):
         weight_sum = self.attention_dropout(F.softmax(weight, dim=-1))
         out = self.final_dropout(self.Wo(rearrange(weight_sum, 'b h n d -> b n (h d)')))
         return out
+    
+class MLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.W1 = nn.Linear(config.d_model, 4*config.d_model)
+        self.W2 = nn.Linear(4*config.d_model, config.d_model)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = F.gelu(self.W1(x))
+        x = self.W2(x)
+        out = self.dropout(x)
+        return out
