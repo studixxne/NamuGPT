@@ -51,3 +51,17 @@ class MLP(nn.Module):
         x = self.W2(x)
         out = self.dropout(x)
         return out
+    
+class TransformerBlock(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+
+        self.attention = CausalSelfAttention(config)
+        self.pre_ln = nn.LayerNorm(config.d_model)
+        self.mlp = MLP(config)
+        self.post_ln = nn.LayerNorm(config.d_model)
+
+    def forward(self, x):
+        x = x + self.attention(self.pre_ln(x))
+        out = x + self.mlp(self.post_ln(x))
+        return out
