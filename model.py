@@ -97,7 +97,6 @@ class NanoGPT(nn.Module):
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
         self.token_embed.weight = self.lm_head.weight
 
-
     def forward(self, x, targets=None):
         # x: (batch, n)
         device = x.device
@@ -114,13 +113,13 @@ class NanoGPT(nn.Module):
 
         # 학습 중일 때는 모든 토큰들에 대한 logits을 계산
         if targets is not None:
-            logits = self.lm_head(x) # (b, n)
+            logits = self.lm_head(x) # (b, n, vocab_size)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
         else:
             # 추론의 경우에는 마지막 토큰에 대해서만 연산을 진행해 계산량을 줄임.
-            # 이 때 x[:, [-1], :]로 인덱싱 함으로써 (b, 1, d)로 차원 유지 (Keepdims=True)
-            logits = self.lm_head(x[:, [-1], :]) # (b, 1, d)
+            # 이 때 x[:, [-1], :]로 인덱싱 함으로써 (b, 1, vocab_size)로 차원 유지 (Keepdims=True)
+            logits = self.lm_head(x[:, [-1], :]) # (b, 1, vocab_size)
             loss = None
 
         return logits, loss
