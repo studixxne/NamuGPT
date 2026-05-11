@@ -123,3 +123,36 @@ class NanoGPT(nn.Module):
             loss = None
 
         return logits, loss
+    
+    @torch.no_grad()
+    def generate(self, tokens, max_new_tokens, temperature=1.0, top_k=None):
+        """
+        tokens: (b, n) - 프롬프트 토큰 인덱스
+        max_new_tokens: int -> 새로 생성될 수 있는 최대 토큰 개수
+        temperature: float -> 낮을수록 Greedy와 가까워지고 높아질수록 다양성 증가
+        top_k: int -> 계산된 확률의 상위 k개의 토큰만 후보로 남기고 최종적으로 토큰을 선정함
+        """
+
+        for _ in range(max_new_tokens):
+            # Context Length가 Block Size를 초과하면 가장 최근의 토큰만 읽어냄
+            tokens = tokens[:, -self.config.block_size:]
+
+            logits, _ = self(tokens)                  # (b, 1, vocab_size)
+            logits = logits[:, -1, :] / temperature # (b, vocab_size)
+
+            # 상위 K개의 토큰만 선정할 수 있도록 하여 필요없는 꼬리 확률들의 단어들을 모두 잘라냄
+            if top_k is not None:
+                # 상위 k개의 값들을 가져옴
+                topk_vals, _ = torch.topk(logits, min(top_k, logits.size(-1)))  # (b, top_k)
+
+                # top_k value 중에서 가장 작은 값보다 작은 logit들을 -inf로 마스킹
+                logits[logits < topk_vals[:, [-1]]] = float('-inf')
+
+            # top_k에 속해있는 Vocab에 대해서만 확률 재정규화
+            probs = F.softmax(logits, dim=-1)
+            # probs에 기반하여 1개 샘플링
+            new_token = torch.multinomial(probs, num_samples=1)  # (b, 1)
+            # 새로 샘플링한 토큰과 누적된 토큰을 concat 해줌
+            tokens = torch.cat([tokens, new_token])
+
+        return tokens
