@@ -82,3 +82,45 @@ class TransformerBlock(nn.Module):
         x = x + self.attention(self.pre_ln(x))
         out = x + self.mlp(self.post_ln(x))
         return out
+    
+class NanoGPT(nn.Module):
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.config = config  # generate()에서 block_size를 참조하기 위해 저장
+
+        self.token_embed = nn.Embedding(config.vocab_size, config.d_model)
+        self.position_embed = nn.Embedding(config.block_size, config.d_model)
+        self.dropout = nn.Dropout(config.dropout)
+        self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)])
+        self.final_ln = nn.LayerNorm(config.d_model)
+
+        self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.token_embed.weight = self.lm_head.weight
+
+
+    def forward(self, x, targets=None):
+        # x: (batch, n)
+        device = x.device
+        b, n = x.shape
+
+        x = self.token_embed(x) + self.position_embed(torch.arange(0, n, dtype=torch.long, device=device))
+        x = self.dropout(x)
+
+        for block in self.blocks:
+            x = block(x)
+
+        # (b, n, d)
+        x = self.final_ln(x)
+
+        # 학습 중일 때는 모든 토큰들에 대한 logits을 계산
+        if targets is not None:
+            logits = self.lm_head(x) # (b, n)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+
+        else:
+            # 추론의 경우에는 마지막 토큰에 대해서만 연산을 진행해 계산량을 줄임.
+            # 이 때 x[:, [-1], :]로 인덱싱 함으로써 (b, 1, d)로 차원 유지 (Keepdims=True)
+            logits = self.lm_head(x[:, [-1], :]) # (b, 1, d)
+            loss = None
+
+        return logits, loss
