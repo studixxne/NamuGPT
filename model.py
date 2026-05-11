@@ -135,9 +135,9 @@ class NanoGPT(nn.Module):
 
         for _ in range(max_new_tokens):
             # Context Length가 Block Size를 초과하면 가장 최근의 토큰만 읽어냄
-            tokens = tokens[:, -self.config.block_size:]
+            tokens_cond = tokens[:, -self.config.block_size:]
 
-            logits, _ = self(tokens)                  # (b, 1, vocab_size)
+            logits, _ = self(tokens_cond)           # (b, 1, vocab_size)
             logits = logits[:, -1, :] / temperature # (b, vocab_size)
 
             # 상위 K개의 토큰만 선정할 수 있도록 하여 필요없는 꼬리 확률들의 단어들을 모두 잘라냄
@@ -153,6 +153,6 @@ class NanoGPT(nn.Module):
             # probs에 기반하여 1개 샘플링
             new_token = torch.multinomial(probs, num_samples=1)  # (b, 1)
             # 새로 샘플링한 토큰과 누적된 토큰을 concat 해줌
-            tokens = torch.cat([tokens, new_token])
+            tokens = torch.cat([tokens, new_token], dim=-1)
 
         return tokens
