@@ -97,19 +97,55 @@ class GPTDataset(Dataset):
         x = data[:-1]
         y = data[1:]
         return x, y
-        
+
+def train(model, data_loader, optimizer, scheduler, device, epochs, total_steps, grad_clip=1.0, log_interval=10):
+    model.train()
+    step = 0
+
+    for epoch in range(epochs):
+        for x, y in data_loader:
+            x, y = x.to(device), y.to(device)
+
+            _, loss = model(x, targets=y)
+
+            optimizer.zero_grad()
+            loss.backward()
+
+            # 뒤에 _가 붙으면 inplace 연산
+            # loss가 튈 때 gradient가 폭발하여 학습이 망가질 수 있음으로 이를 방지하기 위해서 Grad Cliping 도입
+            # 만약 L2 Norm이 5.0 이라면 grad_clip이 1.0이므로 모든 기울기에 0.2를 곱함으로써 L2 Norm을 1로 맞춰준다
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+
+            optimizer.step()
+            scheduler.step()
+
+            step += 1
+            if step % log_interval == 0:
+                current_lr = scheduler.get_last_lr()[0]
+                print(f'epoch [{epoch+1}|{epochs}] | step [{step}|{total_steps}] | loss {loss.item():.4f} | current_lr {current_lr:.2e}')
+
 if __name__ == '__main__':
+    from model import NanoGPT, GPTConfig
+
     # *=============================================*
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
     tokenizer = PreTrainedTokenizerFast.from_pretrained('skt/kogpt2-base-v2')
-    block_size = 16
+
+    config = GPTConfig()
+    block_size = config.block_size
     batch_size = 8
+    epochs = 3
+    max_lr = 1e-4
+    warmup_steps = 100
     text = '안녕하세요? 두쫀쿠 좋아하세요? 저는 두쫀쿠를 먹어봤는데 그냥 크런키 맛나는데 이걸 8000원 넘게 줘가면서 먹을 필요가 있을까요?'
     # *=============================================*
 
     dataset = GPTDataset(text, tokenizer, block_size)
     data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    total_steps = epochs * len(data_loader)
 
-    for batch_idx, (x, y) in enumerate(data_loader):
-        print(f'{tokenizer.decode(x)}')
-        print(f'{tokenizer.decode(y)}')
-        break
+    model = NanoGPT(config).to(device)
+    optimizer = configure_optimizer(model, lr=max_lr)
+    scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps)
+
+    train(model, data_loader, optimizer, scheduler, device, epochs, total_steps)
