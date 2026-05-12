@@ -15,6 +15,7 @@ class TrainConfig:
     min_lr_ratio:  float = 0.1
     grad_clip:     float = 1.0
     log_interval:  int   = 10
+    eval_interval: int   = 500
 
 def configure_optimizer(model, train_cfg: TrainConfig):
     """
@@ -111,7 +112,21 @@ class GPTDataset(Dataset):
         y = data[1:]
         return x, y
 
-def train(model, data_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig):
+@torch.no_grad()
+def evaluate(model, val_loader, device):
+    model.eval()
+    total_loss, cnt = 0.0, 0
+
+    for x, y in val_loader:
+        x, y = x.to(device), y.to(device)
+        _, loss = model(x, targets=y)
+        total_loss += loss.item()
+        cnt += 1
+
+    model.train()
+    return total_loss / cnt
+
+def train(model, data_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig):
     model.train()
     step = 0
 
@@ -136,6 +151,11 @@ def train(model, data_loader, optimizer, scheduler, device, total_steps, train_c
             if step % train_cfg.log_interval == 0:
                 current_lr = scheduler.get_last_lr()[0]
                 print(f'epoch [{epoch+1}|{train_cfg.epochs}] | step [{step}|{total_steps}] | loss {loss.item():.4f} | current_lr {current_lr:.2e}')
+
+            # 일정 주기로 일반화 성능을 체크하기 위해 val_loss 계산 및 출력
+            if step % train_cfg.eval_interval == 0:
+                val_loss = evaluate(model, val_loader, device)
+                print(f'[Validation] - step [{step}|{total_steps}] | val_loss {val_loss:.4f}')
 
 if __name__ == '__main__':
     from model import NanoGPT, GPTConfig
