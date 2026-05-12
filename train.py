@@ -1,3 +1,4 @@
+import math
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizerFast
@@ -48,6 +49,40 @@ def configure_optimizer(model, lr, weight_decay=0.1, betas=(0.9, 0.95)):
     use_fused = torch.cuda.is_available()
     optimizer = torch.optim.AdamW(param_groups, lr=lr, betas=betas, fused=use_fused)
     return optimizer
+
+def get_lr_scheduler(optimizer, warmup_steps, total_steps, min_lr_ratio=0.1):
+    """
+        Cosine Decay를 바로 적용하기 이전에 Warmup을 적용함으로써 lr을 작게 설정해 초기 학습을 안정화시켜준다.
+
+        1. 사전학습 초기에는 Weight가 무작위 분포이기 때문에 Gradient가 불안정함으로 Warmup 단계가 필요하다. (하지만 Pre-LN 구조일 때 (1)의 경우 WarmUp이 없어도 학습이 안정화된다.)
+        2. Optimizer Adam은 초기 v의 값이 0이기 때문에 지정한 lr보다 매우 커짐으로 이를 예방하기 위해 초기에는 lr을 매우 작게 설정해줘야 한다.
+
+        -> 이를 위해서 매 step에 따라 직접 비율을 조절할 수 있는 lr_scheduler.LambdaLR 사용
+    """
+
+    # learning rate에 곱해질 비율 (Ratio, 0.0 ~ 1.0)을 반환하는 함수
+    def lr_lambda(step):
+        # Warmup 구간 (step < warmup_steps)
+        # step이 0에서 warmup_steps로 올라가면서 ratio가 0.0에서 1.0으로 선형적으로 증가하게 된다.
+        if step < warmup_steps:
+            return step / warmup_steps
+        
+        # 총 학습 스텝이 모든 끝난 경우, 즉 추가 학습 시에는 미세 조정을 위해 최소 비율을 적용한다.
+        if step > total_steps:
+            return min_lr_ratio
+        
+        # Warmup 구간 <= step <= total_steps 일 때는 Cosine Decay를 적용한다.
+        # 막 Warmup이 끝났을 때에는 진척도가 0.0이며, 전체 학습이 끝나가는 시점에는 진척도가 1.0이 된다.
+        progress = (step - warmup_steps) / (total_steps - warmup_steps)
+        
+        # progress는 [0, 1]임으로 cos은 [-1, 1]이 된다.
+        # 최소 학습 비율 이상을 반드시 유지하되 진척도가 커질수록 ratio가 1에서부터 시작하여 천천히 감소하도록 한다.
+        ratio = min_lr_ratio + 0.5 * (1 - min_lr_ratio) * (1 + math.cos(math.pi * progress))
+        return ratio
+    
+    # 매 스텝마다 optimizer의 정해진 lr에 lr_lambda로 얻어진 ratio를 곱해서 구한 lr로 학습을 진행시키는 Scheduler
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    return scheduler
 
 class GPTDataset(Dataset):
     def __init__(self, text, tokenizer, block_size):
