@@ -5,9 +5,7 @@ from transformers import PreTrainedTokenizerFast
 class GPTDataset(Dataset):
     def __init__(self, text, tokenizer, block_size):
         self.block_size = block_size
-        self.tokens = tokenizer.encode(text,
-                                       return_tensors='pt',
-                                       dtype=torch.long)[0]
+        self.tokens = tokenizer.encode(text, return_tensors='pt')[0].long()
         
     def __len__(self):
         return (len(self.tokens)-1) // self.block_size
