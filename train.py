@@ -7,17 +7,19 @@ from transformers import PreTrainedTokenizerFast
 
 @dataclass
 class TrainConfig:
-    batch_size:    int   = 8
-    epochs:        int   = 3
-    max_lr:        float = 1e-4
-    weight_decay:  float = 0.1
-    betas:         tuple = (0.9, 0.95)
-    warmup_steps:  int   = 100
-    min_lr_ratio:  float = 0.1
-    grad_clip:     float = 1.0
-    log_interval:  int   = 10
-    eval_interval: int   = 500
-    ckpt_dir:      str   = 'checkpoints'
+    batch_size:    int        = 8               # Batch Size
+    epochs:        int        = 3               # Epoch 횟수
+    max_lr:        float      = 1e-4            # Learning Rate
+    weight_decay:  float      = 0.1             # Weight Decay 강도    
+    betas:         tuple      = (0.9, 0.95)     # AdamW beta 설정
+    warmup_steps:  int        = 100             # warmup step 횟수
+    min_lr_ratio:  float      = 0.1             # 최소로 보장되는 학습 비율 (ratio * lr이 최종 학습률)
+    grad_clip:     float      = 1.0             # Gradient Cliping 기준
+    log_interval:  int        = 10              # 로그 기록 간격
+    eval_interval: int        = 500             # Evaluation 간격
+    ckpt_dir:      str        = 'checkpoints'   # CheckPoint 파일 저장할 Dir 위치
+    val_ratio:     float      = 0.1             # Validation 데이터에 사용할 비율
+    max_articles:  int | None = None            # int이거나 None (학습에 사용할 article의 개수)
 
 def configure_optimizer(model, train_cfg: TrainConfig):
     """
@@ -100,16 +102,29 @@ def get_lr_scheduler(optimizer, total_steps, train_cfg: TrainConfig):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
     return scheduler
 
+# dataset을 가져와서 max_articles의 개수만큼의 text를 encode하여 flat한 torch로 반환
+def build_corpus(dataset, tokenizer, max_articles=None):
+    eos_id = tokenizer.eos_token_id
+    all_ids = []
+
+    for i, item in enumerate(dataset):
+        if max_articles is not None and i >= max_articles:
+            break
+        all_ids.extend(tokenizer.encode(item['text']))
+        all_ids.append(eos_id)
+
+    return torch.tensor(all_ids, dtype=torch.long)
+
 class GPTDataset(Dataset):
-    def __init__(self, text, tokenizer, block_size):
+    def __init__(self, tokens: torch.Tensor, block_size: int):
+        self.tokens = tokens
         self.block_size = block_size
-        self.tokens = tokenizer.encode(text, return_tensors='pt')[0].long()
-        
+
     def __len__(self):
-        return (len(self.tokens)-1) // self.block_size
-        
+        return (len(self.tokens) - 1) // self.block_size
+
     def __getitem__(self, index):
-        data = self.tokens[index*self.block_size:index*self.block_size+self.block_size+1]
+        data = self.tokens[index*self.block_size : index*self.block_size + self.block_size + 1]
         x = data[:-1]
         y = data[1:]
         return x, y
@@ -147,13 +162,13 @@ def load_checkpoint(path, model, optimizer, scheduler, device):
     scheduler.load_state_dict(check_point['scheduler_state_dict'])
     return check_point['step'], check_point['val_loss']
 
-def train(model, data_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig):
+def train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig):
     model.train()
     step = 0
     best_val_loss = float('inf')
 
     for epoch in range(train_cfg.epochs):
-        for x, y in data_loader:
+        for x, y in train_loader:
             x, y = x.to(device), y.to(device)
 
             _, loss = model(x, targets=y)
@@ -186,23 +201,33 @@ def train(model, data_loader, val_loader, optimizer, scheduler, device, total_st
                     save_checkpoint(path, model, optimizer, scheduler, step, val_loss, train_cfg)
 
 if __name__ == '__main__':
+    from datasets import load_dataset
     from model import NanoGPT, GPTConfig
 
     # *=============================================*
-    device     = 'cuda' if torch.cuda.is_available() else 'cpu'
-    tokenizer  = PreTrainedTokenizerFast.from_pretrained('skt/kogpt2-base-v2')
-    text       = '안녕하세요? 두쫀쿠 좋아하세요? 저는 두쫀쿠를 먹어봤는데 그냥 크런키 맛나는데 이걸 8000원 넘게 줘가면서 먹을 필요가 있을까요?'
-
+    device    = 'cuda' if torch.cuda.is_available() else 'cpu'
     model_cfg = GPTConfig()
     train_cfg = TrainConfig()
     # *=============================================*
 
-    dataset     = GPTDataset(text, tokenizer, model_cfg.block_size)
-    data_loader = DataLoader(dataset, batch_size=train_cfg.batch_size, shuffle=True)
-    total_steps = train_cfg.epochs * len(data_loader)
+    tokenizer = PreTrainedTokenizerFast.from_pretrained('skt/kogpt2-base-v2')
 
+    # 위키 특성상 문서 별로 주제가 완전히 다르기 때문에 train/val 나누기 전에 셔플하는 것이 좋다.
+    wiki   = load_dataset('heegyu/namuwiki-extracted', split='train').shuffle(seed=39)
+    tokens = build_corpus(wiki, tokenizer, max_articles=train_cfg.max_articles)
+
+    split = int(len(tokens) * (1 - train_cfg.val_ratio))
+    train_tokens = tokens[:split]
+    val_tokens = tokens[split:]
+    train_dataset = GPTDataset(train_tokens, model_cfg.block_size)
+    val_dataset = GPTDataset(val_tokens, model_cfg.block_size)
+
+    train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=train_cfg.batch_size, shuffle=False)
+    total_steps = train_cfg.epochs * len(train_loader)
+    
     model     = NanoGPT(model_cfg).to(device)
     optimizer = configure_optimizer(model, train_cfg)
     scheduler = get_lr_scheduler(optimizer, total_steps, train_cfg)
 
-    train(model, data_loader, optimizer, scheduler, device, total_steps, train_cfg)
+    train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg)
