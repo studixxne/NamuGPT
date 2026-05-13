@@ -1,4 +1,5 @@
 import math
+import os
 import torch
 from dataclasses import dataclass
 from torch.utils.data import Dataset, DataLoader
@@ -16,6 +17,7 @@ class TrainConfig:
     grad_clip:     float = 1.0
     log_interval:  int   = 10
     eval_interval: int   = 500
+    ckpt_dir:      str   = 'checkpoints'
 
 def configure_optimizer(model, train_cfg: TrainConfig):
     """
@@ -126,9 +128,29 @@ def evaluate(model, val_loader, device):
     model.train()
     return total_loss / cnt
 
+def save_checkpoint(path, model, optimizer, scheduler, step, val_loss, train_cfg):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    torch.save({
+        'step': step,
+        'val_loss': val_loss,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'model_cfg': model.config,
+        'train_cfg': train_cfg
+    }, path)
+
+def load_checkpoint(path, model, optimizer, scheduler, device):
+    check_point = torch.load(path, map_location=device)
+    model.load_state_dict(check_point['model_state_dict'])
+    optimizer.load_state_dict(check_point['optimizer_state_dict'])
+    scheduler.load_state_dict(check_point['scheduler_state_dict'])
+    return check_point['step'], check_point['val_loss']
+
 def train(model, data_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig):
     model.train()
     step = 0
+    best_val_loss = float('inf')
 
     for epoch in range(train_cfg.epochs):
         for x, y in data_loader:
@@ -156,6 +178,12 @@ def train(model, data_loader, val_loader, optimizer, scheduler, device, total_st
             if step % train_cfg.eval_interval == 0:
                 val_loss = evaluate(model, val_loader, device)
                 print(f'[Validation] - step [{step}|{total_steps}] | val_loss {val_loss:.4f}')
+
+                # 최고 성능 모델인 경우 체크 포인트 갱신
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    path = os.path.join(train_cfg.ckpt_dir, f'model_{step}.pt')
+                    save_checkpoint(path, model, optimizer, scheduler, step, val_loss, train_cfg)
 
 if __name__ == '__main__':
     from model import NanoGPT, GPTConfig
