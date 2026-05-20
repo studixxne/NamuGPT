@@ -196,7 +196,7 @@ def save_checkpoint(path, model, optimizer, scheduler, step, val_loss, train_cfg
     }, path)
 
 def load_checkpoint(path, model, optimizer, scheduler, device):
-    check_point = torch.load(path, map_location=device)
+    check_point = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(check_point['model_state_dict'])
     optimizer.load_state_dict(check_point['optimizer_state_dict'])
     scheduler.load_state_dict(check_point['scheduler_state_dict'])
@@ -222,12 +222,15 @@ def _save_loss_plot(ckpt_dir):
     fig.savefig(os.path.join(ckpt_dir, 'loss.png'))
     plt.close(fig)
 
-def train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig):
+def train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig, start_step=0):
     model.train()
-    step = 0
+    step = start_step
     best_val_loss = float('inf')
     train_log = []  # (step, loss)
     val_log   = []  # (step, val_loss)
+
+    steps_per_epoch = len(train_loader)
+    start_epoch = start_step // steps_per_epoch
 
     def save_model(current_step):
         nonlocal best_val_loss
@@ -250,7 +253,7 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
                             model, optimizer, scheduler, current_step, val_loss, train_cfg)
 
     print(f'# Training Start')
-    for epoch in tqdm(range(train_cfg.epochs)):
+    for epoch in tqdm(range(start_epoch, train_cfg.epochs)):
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
 
@@ -282,8 +285,13 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
         save_model(step)
 
 if __name__ == '__main__':
+    import argparse
     from datasets import load_dataset
     from model import NanoGPT, GPTConfig
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--load', action='store_true', help='latest_model.pt에서 학습 재개')
+    args = parser.parse_args()
 
     # *=============================================*
     device    = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -319,9 +327,17 @@ if __name__ == '__main__':
     total_steps = train_cfg.epochs * len(train_loader)
     
     model     = NanoGPT(model_cfg).to(device)
-    model     = torch.compile(model) # 모델 최적화
     optimizer = configure_optimizer(model, train_cfg)
     scheduler = get_lr_scheduler(optimizer, total_steps, train_cfg)
 
-    train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg)
+    start_step = 0
+    if args.load:
+        ckpt_path = os.path.join(train_cfg.ckpt_dir, 'latest_model.pt')
+        assert os.path.exists(ckpt_path), f'# 체크포인트 파일이 존재하지 않습니다: {ckpt_path}'
+        start_step, _ = load_checkpoint(ckpt_path, model, optimizer, scheduler, device)
+        print(f'# 체크포인트 로드 완료: Step {start_step}에서 재개합니다.')
+
+    model = torch.compile(model)
+
+    train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg, start_step)
     _save_loss_plot(train_cfg.history_dir)
