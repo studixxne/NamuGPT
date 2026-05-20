@@ -175,7 +175,8 @@ def evaluate(model, val_loader, device):
 
     for x, y in val_loader:
         x, y = x.to(device), y.to(device)
-        _, loss = model(x, targets=y)
+        with torch.autocast('cuda', dtype=torch.bfloat16):
+            _, loss = model(x, targets=y)
         total_loss += loss.item()
         cnt += 1
 
@@ -253,7 +254,9 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
 
-            _, loss = model(x, targets=y)
+            # 혼합 정밀도 BF16을 사용함으로써 연산 최적화
+            with torch.autocast('cuda', dtype=torch.bfloat16):
+                _, loss = model(x, targets=y)
 
             optimizer.zero_grad()
             loss.backward()
@@ -294,8 +297,16 @@ if __name__ == '__main__':
         pad_token='<pad>', mask_token='<mask>'
     )
 
-    wiki = load_dataset('heegyu/namuwiki-extracted', split='train').shuffle(seed=39)
-    tokens = build_corpus(wiki, tokenizer, max_articles=train_cfg.max_articles)
+    cache_dir = 'token_cache'
+    os.makedirs(cache_dir, exist_ok=True)
+    articles_num = 'full' if train_cfg.max_articles is None else train_cfg.max_articles
+    token_cache_path = f"token_cache/tokens_{articles_num}.pt"
+    if os.path.exists(token_cache_path):
+        tokens = torch.load(token_cache_path)
+    else:
+        wiki = load_dataset('heegyu/namuwiki-extracted', split='train').shuffle(seed=39)
+        tokens = build_corpus(wiki, tokenizer, max_articles=train_cfg.max_articles)
+        torch.save(tokens, token_cache_path)
 
     split = int(len(tokens) * (1 - train_cfg.val_ratio))
     train_tokens = tokens[:split]
@@ -308,6 +319,7 @@ if __name__ == '__main__':
     total_steps = train_cfg.epochs * len(train_loader)
     
     model     = NanoGPT(model_cfg).to(device)
+    model     = torch.compile(model) # 모델 최적화
     optimizer = configure_optimizer(model, train_cfg)
     scheduler = get_lr_scheduler(optimizer, total_steps, train_cfg)
 
