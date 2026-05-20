@@ -1,23 +1,30 @@
+import json
 import math
 import os
+import numpy as np
 import torch
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizerFast
+from tqdm import tqdm
 
 @dataclass
 class TrainConfig:
-    batch_size:    int        = 8               # Batch Size
+    batch_size:    int        = 32              # Batch Size
     epochs:        int        = 3               # Epoch 횟수
-    max_lr:        float      = 1e-4            # Learning Rate
+    max_lr:        float      = 3e-4            # Learning Rate
     weight_decay:  float      = 0.1             # Weight Decay 강도    
     betas:         tuple      = (0.9, 0.95)     # AdamW beta 설정
-    warmup_steps:  int        = 100             # warmup step 횟수
+    warmup_steps:  int        = 600             # warmup step 횟수
     min_lr_ratio:  float      = 0.1             # 최소로 보장되는 학습 비율 (ratio * lr이 최종 학습률)
     grad_clip:     float      = 1.0             # Gradient Cliping 기준
-    log_interval:  int        = 10              # 로그 기록 간격
-    eval_interval: int        = 500             # Evaluation 간격
+    log_interval:  int        = 100             # 로그 기록 간격
+    eval_interval: int        = 2000            # Evaluation 간격
     ckpt_dir:      str        = 'checkpoints'   # CheckPoint 파일 저장할 Dir 위치
+    history_dir:   str        = 'histories'     # Loss History를 기록할 Dir 위치
     val_ratio:     float      = 0.1             # Validation 데이터에 사용할 비율
     max_articles:  int | None = None            # int이거나 None (학습에 사용할 article의 개수)
 
@@ -104,16 +111,43 @@ def get_lr_scheduler(optimizer, total_steps, train_cfg: TrainConfig):
 
 # dataset을 가져와서 max_articles의 개수만큼의 text를 encode하여 flat한 torch로 반환
 def build_corpus(dataset, tokenizer, max_articles=None):
+    if max_articles is not None:
+        print(f'# {max_articles} 개의 문서를 활용해서 인코딩을 수행합니다.')
+        dataset = dataset.select(range(min(max_articles, len(dataset))))
+
+    def process_function(examples):
+        outputs = tokenizer(examples['text'], add_special_tokens=False)
+        return {"ids": outputs["input_ids"]}
+    
+    '''
+    ** dataset.map **
+
+    dataset의 문서들에 process_function 작업 수행
+    batched=True -> batch로 묶어서 연산 수행
+    num_proc = 코어 개수
+    remove_columns = 함수 적용이 끝나면 제거할 원본 column 
+    (dataset.column_names를 통해 'title', 'text' 등 모든 열 제거)
+    
+    '''
+    print(f'# 멀티코어 토크나이징을 수행합니다.')
+    tokenized_dataset = dataset.map(
+        process_function,
+        batched=True,
+        num_proc=4,
+        remove_columns=dataset.column_names
+    )
+
+    print(f'# 토큰을 단일 배열로 통합합니다.')
     eos_id = tokenizer.eos_token_id
-    all_ids = []
+    assert eos_id is not None, 'eos_id는 반드시 존재해야 합니다'
+    chunks = []
+    for row in tqdm(tokenized_dataset, desc="Merging tokens"):
+        chunks.append(np.array(row['ids']+[eos_id], dtype=np.int32))
+    
+    final_tokens = np.concatenate(chunks)
+    print(f'# 인코딩 완료! 최종 토큰 개수 {len(final_tokens)}')
 
-    for i, item in enumerate(dataset):
-        if max_articles is not None and i >= max_articles:
-            break
-        all_ids.extend(tokenizer.encode(item['text']))
-        all_ids.append(eos_id)
-
-    return torch.tensor(all_ids, dtype=torch.long)
+    return torch.from_numpy(final_tokens.astype(np.int64))
 
 class GPTDataset(Dataset):
     def __init__(self, tokens: torch.Tensor, block_size: int):
@@ -162,10 +196,32 @@ def load_checkpoint(path, model, optimizer, scheduler, device):
     scheduler.load_state_dict(check_point['scheduler_state_dict'])
     return check_point['step'], check_point['val_loss']
 
+def _save_loss_plot(ckpt_dir):
+    log_path = os.path.join(ckpt_dir, 'loss_log.json')
+    with open(log_path) as f:
+        logs = json.load(f)
+    train_log = logs['train']
+    val_log   = logs['val']
+
+    fig, ax = plt.subplots()
+    if train_log:
+        steps, losses = zip(*train_log)
+        ax.plot(steps, losses, label='train')
+    if val_log:
+        steps, losses = zip(*val_log)
+        ax.plot(steps, losses, label='val')
+    ax.set_xlabel('step')
+    ax.set_ylabel('loss')
+    ax.legend()
+    fig.savefig(os.path.join(ckpt_dir, 'loss.png'))
+    plt.close(fig)
+
 def train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig):
     model.train()
     step = 0
     best_val_loss = float('inf')
+    train_log = []  # (step, loss)
+    val_log   = []  # (step, val_loss)
 
     for epoch in range(train_cfg.epochs):
         for x, y in train_loader:
@@ -187,18 +243,28 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
             step += 1
             if step % train_cfg.log_interval == 0:
                 current_lr = scheduler.get_last_lr()[0]
+                train_log.append((step, loss.item()))
                 print(f'epoch [{epoch+1}|{train_cfg.epochs}] | step [{step}|{total_steps}] | loss {loss.item():.4f} | current_lr {current_lr:.2e}')
 
             # 일정 주기로 일반화 성능을 체크하기 위해 val_loss 계산 및 출력
             if step % train_cfg.eval_interval == 0:
                 val_loss = evaluate(model, val_loader, device)
+                val_log.append((step, val_loss))
                 print(f'[Validation] - step [{step}|{total_steps}] | val_loss {val_loss:.4f}')
 
-                # 최고 성능 모델인 경우 체크 포인트 갱신
+                os.makedirs(train_cfg.history_dir, exist_ok=True)
+                with open(os.path.join(train_cfg.history_dir, 'loss_log.json'), 'w') as f:
+                    json.dump({'train': train_log, 'val': val_log}, f)
+
+                # 최신 모델 저장
+                save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'latest_model.pt'),
+                                model, optimizer, scheduler, step, val_loss, train_cfg)
+
+                # 최고 성능 모델 저장
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    path = os.path.join(train_cfg.ckpt_dir, f'model_{step}.pt')
-                    save_checkpoint(path, model, optimizer, scheduler, step, val_loss, train_cfg)
+                    save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'best_model.pt'),
+                                    model, optimizer, scheduler, step, val_loss, train_cfg)
 
 if __name__ == '__main__':
     from datasets import load_dataset
@@ -210,10 +276,13 @@ if __name__ == '__main__':
     train_cfg = TrainConfig()
     # *=============================================*
 
-    tokenizer = PreTrainedTokenizerFast.from_pretrained('skt/kogpt2-base-v2')
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(
+        'skt/kogpt2-base-v2',
+        bos_token='</s>', eos_token='</s>', unk_token='<unk>',
+        pad_token='<pad>', mask_token='<mask>'
+    )
 
-    # 위키 특성상 문서 별로 주제가 완전히 다르기 때문에 train/val 나누기 전에 셔플하는 것이 좋다.
-    wiki   = load_dataset('heegyu/namuwiki-extracted', split='train').shuffle(seed=39)
+    wiki = load_dataset('heegyu/namuwiki-extracted', split='train').shuffle(seed=39)
     tokens = build_corpus(wiki, tokenizer, max_articles=train_cfg.max_articles)
 
     split = int(len(tokens) * (1 - train_cfg.val_ratio))
@@ -231,3 +300,4 @@ if __name__ == '__main__':
     scheduler = get_lr_scheduler(optimizer, total_steps, train_cfg)
 
     train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg)
+    _save_loss_plot(train_cfg.ckpt_dir)
