@@ -2,7 +2,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from einops import rearrange
-import math
 from dataclasses import dataclass
 
 @dataclass
@@ -10,11 +9,22 @@ class GPTConfig:
     # 타입 어노테이션이 있을 경우에는 Instance Variable
     # 타입 어노테이션이 없는 경우에는 Class Variable (모든 Instance가 공유)
     vocab_size: int = 51200   # skt/kogpt2-base-v2 vocabulary size
-    block_size: int = 256     # 최대 context 길이 (position embedding 크기)
-    d_model: int = 256        # embedding / hidden 차원
-    n_layer: int = 6          # TransformerBlock 개수
-    head_num: int = 8         # attention head 수 → d_head = d_model / head_num = 32
-    dropout: float = 0.1
+    block_size: int = 1024    # 최대 context 길이 (position embedding 크기)
+    d_model: int = 768        # embedding / hidden 차원
+    n_layer: int = 12          # TransformerBlock 개수
+    head_num: int = 12         # attention head 수 → d_head = d_model / head_num = 32
+    dropout: float = 0.0
+
+"""
+입력층 : vocab_size * d_model + block_size * d_model
+디코더 블록 : 12 * d_model * d_model
+
+Total : 입력층 + n_layer * (Attn + MLP)
+
+입력층: 40,108,032
+디코더 블록: 84,934,656
+총 파라미터: 125,042,688 -> 약 125M
+"""
     
 class CausalSelfAttention(nn.Module):
     def __init__(self, config):
