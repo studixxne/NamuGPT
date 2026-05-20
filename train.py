@@ -14,18 +14,18 @@ from tqdm import tqdm
 @dataclass
 class TrainConfig:
     batch_size:    int        = 32              # Batch Size
-    epochs:        int        = 3               # Epoch 횟수
-    max_lr:        float      = 3e-4            # Learning Rate
+    epochs:        int        = 2               # Epoch 횟수
+    max_lr:        float      = 6e-4            # Learning Rate
     weight_decay:  float      = 0.1             # Weight Decay 강도    
     betas:         tuple      = (0.9, 0.95)     # AdamW beta 설정
-    warmup_steps:  int        = 600             # warmup step 횟수
+    warmup_steps:  int        = 2000            # warmup step 횟수
     min_lr_ratio:  float      = 0.1             # 최소로 보장되는 학습 비율 (ratio * lr이 최종 학습률)
     grad_clip:     float      = 1.0             # Gradient Cliping 기준
-    log_interval:  int        = 100             # 로그 기록 간격
-    eval_interval: int        = 2000            # Evaluation 간격
+    log_interval:  int        = 50              # 로그 기록 간격
+    eval_interval: int        = 1000            # Evaluation 간격
     ckpt_dir:      str        = 'checkpoints'   # CheckPoint 파일 저장할 Dir 위치
     history_dir:   str        = 'histories'     # Loss History를 기록할 Dir 위치
-    val_ratio:     float      = 0.1             # Validation 데이터에 사용할 비율
+    val_ratio:     float      = 0.005           # Validation 데이터에 사용할 비율
     max_articles:  int | None = None            # int이거나 None (학습에 사용할 article의 개수)
 
 def configure_optimizer(model, train_cfg: TrainConfig):
@@ -114,6 +114,8 @@ def build_corpus(dataset, tokenizer, max_articles=None):
     if max_articles is not None:
         print(f'# {max_articles} 개의 문서를 활용해서 인코딩을 수행합니다.')
         dataset = dataset.select(range(min(max_articles, len(dataset))))
+    else:
+        print(f'# 전체 데이터셋인 {len(dataset)} 개의 문서를 활용해서 인코딩을 수행합니다.')
 
     def process_function(examples):
         outputs = tokenizer(examples['text'], add_special_tokens=False)
@@ -127,25 +129,28 @@ def build_corpus(dataset, tokenizer, max_articles=None):
     num_proc = 코어 개수
     remove_columns = 함수 적용이 끝나면 제거할 원본 column 
     (dataset.column_names를 통해 'title', 'text' 등 모든 열 제거)
-    
+
     '''
-    print(f'# 멀티코어 토크나이징을 수행합니다.')
+    print(f'# 토크나이징을 수행합니다.')
     tokenized_dataset = dataset.map(
         process_function,
         batched=True,
         num_proc=4,
-        remove_columns=dataset.column_names
+        remove_columns=dataset.column_names,
+        desc='Tokenizing'
     )
 
     print(f'# 토큰을 단일 배열로 통합합니다.')
     eos_id = tokenizer.eos_token_id
     assert eos_id is not None, 'eos_id는 반드시 존재해야 합니다'
+
+    # ids를 리스트로 보관하면 Memory 요구량이 급격하게 증가함으로 np.array로 보관
     chunks = []
     for row in tqdm(tokenized_dataset, desc="Merging tokens"):
         chunks.append(np.array(row['ids']+[eos_id], dtype=np.int32))
     
     final_tokens = np.concatenate(chunks)
-    print(f'# 인코딩 완료! 최종 토큰 개수 {len(final_tokens)}')
+    print(f'# 인코딩 완료! 최종 토큰 개수: {len(final_tokens)}')
 
     return torch.from_numpy(final_tokens.astype(np.int64))
 
@@ -223,7 +228,28 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
     train_log = []  # (step, loss)
     val_log   = []  # (step, val_loss)
 
-    for epoch in range(train_cfg.epochs):
+    def save_model(current_step):
+        nonlocal best_val_loss
+
+        val_loss = evaluate(model, val_loader, device)
+        val_log.append((current_step, val_loss))
+
+        os.makedirs(train_cfg.history_dir, exist_ok=True)
+        with open(os.path.join(train_cfg.history_dir, 'loss_log.json'), 'w') as f:
+            json.dump({'train': train_log, 'val': val_log}, f)
+
+        # 최신 모델 저장
+        save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'latest_model.pt'),
+                        model, optimizer, scheduler, current_step, val_loss, train_cfg)
+
+        # 최고 성능 모델 저장
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'best_model.pt'),
+                            model, optimizer, scheduler, current_step, val_loss, train_cfg)
+
+    print(f'# Training Start')
+    for epoch in tqdm(range(train_cfg.epochs)):
         for x, y in train_loader:
             x, y = x.to(device), y.to(device)
 
@@ -244,27 +270,13 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
             if step % train_cfg.log_interval == 0:
                 current_lr = scheduler.get_last_lr()[0]
                 train_log.append((step, loss.item()))
-                print(f'epoch [{epoch+1}|{train_cfg.epochs}] | step [{step}|{total_steps}] | loss {loss.item():.4f} | current_lr {current_lr:.2e}')
+                tqdm.write(f'epoch [{epoch+1}|{train_cfg.epochs}] | step [{step}|{total_steps}] | loss {loss.item():.4f} | current_lr {current_lr:.2e}')
 
             # 일정 주기로 일반화 성능을 체크하기 위해 val_loss 계산 및 출력
             if step % train_cfg.eval_interval == 0:
-                val_loss = evaluate(model, val_loader, device)
-                val_log.append((step, val_loss))
-                print(f'[Validation] - step [{step}|{total_steps}] | val_loss {val_loss:.4f}')
+                save_model(step)
 
-                os.makedirs(train_cfg.history_dir, exist_ok=True)
-                with open(os.path.join(train_cfg.history_dir, 'loss_log.json'), 'w') as f:
-                    json.dump({'train': train_log, 'val': val_log}, f)
-
-                # 최신 모델 저장
-                save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'latest_model.pt'),
-                                model, optimizer, scheduler, step, val_loss, train_cfg)
-
-                # 최고 성능 모델 저장
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'best_model.pt'),
-                                    model, optimizer, scheduler, step, val_loss, train_cfg)
+        save_model(step)
 
 if __name__ == '__main__':
     from datasets import load_dataset
@@ -300,4 +312,4 @@ if __name__ == '__main__':
     scheduler = get_lr_scheduler(optimizer, total_steps, train_cfg)
 
     train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg)
-    _save_loss_plot(train_cfg.ckpt_dir)
+    _save_loss_plot(train_cfg.history_dir)
