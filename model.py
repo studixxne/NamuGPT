@@ -20,6 +20,7 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
 
+        self.config = config
         self.d_model = config.d_model
         self.head_num = config.head_num
         self.d_head = int(self.d_model / self.head_num)
@@ -45,13 +46,25 @@ class CausalSelfAttention(nn.Module):
         K = rearrange(self.Wk(x), 'b n (h d) -> b h n d', h=self.head_num)
         V = rearrange(self.Wv(x), 'b n (h d) -> b h n d', h=self.head_num)
 
+        """
+        ** 직접 구현한 Pure Causal Attention **
+
         weight = (Q @ K.transpose(-1, -2) / (math.sqrt(self.d_head))).masked_fill(self.mask[:, :, :n, :n] == 0, float('-inf'))
         attn = self.attention_dropout(F.softmax(weight, dim=-1))  # (b, h, n, n)
 
         # attn @ V를 통해서 각 단어에 대한 평균 Value를 구해준다.
         # (n, n) @ (n, d) -> (n, d)
+        out_attn = attn @ V
+        """
+
+        # 더 효율적인 학습을 위해 Flash Attention 사용
+        out_attn = F.scaled_dot_product_attention(Q, K, V, 
+                                                  attn_mask=None, 
+                                                  dropout_p=self.config.dropout if self.training else 0.0,
+                                                  is_causal=True)
+
         # 그 후 Wo를 통해 Concat 진행 후 Dropout 적용
-        out = self.final_dropout(self.Wo(rearrange(attn @ V, 'b h n d -> b n (h d)')))
+        out = self.final_dropout(self.Wo(rearrange(out_attn, 'b h n d -> b n (h d)')))
         return out
     
 class MLP(nn.Module):
