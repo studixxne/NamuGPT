@@ -151,7 +151,7 @@ def build_corpus(dataset, tokenizer, max_articles=None):
         chunks.append(np.array(row['ids']+[eos_id], dtype=np.int32))
     
     final_tokens = np.concatenate(chunks)
-    print(f'# 인코딩 완료! 최종 토큰 개수: {len(final_tokens)}')
+    print(f'# 인코딩 완료! 최종 토큰 개수: {len(final_tokens)/1e6:1f}M')
 
     return torch.from_numpy(final_tokens.astype(np.int64))
 
@@ -309,7 +309,15 @@ if __name__ == '__main__':
     torch.set_float32_matmul_precision('high')
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--load', action='store_true', help='latest_model.pt에서 학습 재개')
+    parser.add_argument('--load',          action='store_true', help='latest_model.pt에서 학습 재개')
+    parser.add_argument('--batch_size',    type=int,   default=None)
+    parser.add_argument('--epochs',        type=int,   default=None)
+    parser.add_argument('--grad_accum',    type=int,   default=None)
+    parser.add_argument('--max_lr',        type=float, default=None)
+    parser.add_argument('--warmup_steps',  type=int,   default=None)
+    parser.add_argument('--log_interval',  type=int,   default=None)
+    parser.add_argument('--eval_interval', type=int,   default=None)
+    parser.add_argument('--max_articles',  type=int,   default=None)
     args = parser.parse_args()
 
     # *=============================================*
@@ -317,6 +325,10 @@ if __name__ == '__main__':
     model_cfg = GPTConfig()
     train_cfg = TrainConfig()
     # *=============================================*
+
+    for key, val in vars(args).items():
+        if key != 'load' and val is not None and hasattr(train_cfg, key):
+            setattr(train_cfg, key, val)
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(
         'skt/kogpt2-base-v2',
