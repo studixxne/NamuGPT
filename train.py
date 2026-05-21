@@ -185,25 +185,31 @@ def evaluate(model, val_loader, device):
 
 def save_checkpoint(path, model, optimizer, scheduler, step, val_loss, train_cfg):
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
     torch.save({
         'step': step,
         'val_loss': val_loss,
-        'model_state_dict': model.state_dict(),
+        'model_state_dict': raw_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'scheduler_state_dict': scheduler.state_dict(),
-        'model_cfg': model.config,
+        'model_cfg': raw_model.config,
         'train_cfg': train_cfg
     }, path)
 
 def load_checkpoint(path, model, optimizer, scheduler, device):
     check_point = torch.load(path, map_location=device, weights_only=False)
-    model.load_state_dict(check_point['model_state_dict'])
+    raw_model = model._orig_mod if hasattr(model, '_orig_mod') else model
+    raw_model.load_state_dict(check_point['model_state_dict'])
     optimizer.load_state_dict(check_point['optimizer_state_dict'])
     scheduler.load_state_dict(check_point['scheduler_state_dict'])
     return check_point['step'], check_point['val_loss']
 
 def _save_loss_plot(ckpt_dir):
     log_path = os.path.join(ckpt_dir, 'loss_log.json')
+    
+    if not os.path.exists(log_path):
+        return
+    
     with open(log_path) as f:
         logs = json.load(f)
     train_log = logs['train']
@@ -222,10 +228,10 @@ def _save_loss_plot(ckpt_dir):
     fig.savefig(os.path.join(ckpt_dir, 'loss.png'))
     plt.close(fig)
 
-def train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig, start_step=0):
+def train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig, start_step=0, start_val_loss=float('inf')):
     model.train()
     step = start_step
-    best_val_loss = float('inf')
+    best_val_loss = start_val_loss
     train_log = []  # (step, loss)
     val_log   = []  # (step, val_loss)
 
@@ -242,15 +248,15 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
         with open(os.path.join(train_cfg.history_dir, 'loss_log.json'), 'w') as f:
             json.dump({'train': train_log, 'val': val_log}, f)
 
-        # 최신 모델 저장
-        save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'latest_model.pt'),
-                        model, optimizer, scheduler, current_step, val_loss, train_cfg)
-
         # 최고 성능 모델 저장
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'best_model.pt'),
-                            model, optimizer, scheduler, current_step, val_loss, train_cfg)
+                            model, optimizer, scheduler, current_step, best_val_loss, train_cfg)
+
+        # 최신 모델 저장
+        save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'latest_model.pt'),
+                        model, optimizer, scheduler, current_step, best_val_loss, train_cfg)
 
     print(f'# Training Start')
     for epoch in tqdm(range(start_epoch, train_cfg.epochs)):
@@ -322,8 +328,12 @@ if __name__ == '__main__':
     train_dataset = GPTDataset(train_tokens, model_cfg.block_size)
     val_dataset = GPTDataset(val_tokens, model_cfg.block_size)
 
-    train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=train_cfg.batch_size, shuffle=False)
+    # pin_memory와 persistent_workers를 True로 설정함으로써 고속 메모리 구역에 고정시키고 프로세스를 유지함으로써 성능 개선
+    # drop_last를 True로 설정함으로써 자투리 Batch 버린다. 이를 통해 Shape의 크기가 변하면서 발생할 수 있는 에러나 비효율성 예방
+    train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True,
+                              num_workers=4, pin_memory=True, persistent_workers=True, drop_last=True)
+    val_loader = DataLoader(val_dataset, batch_size=train_cfg.batch_size, shuffle=False,
+                            num_workers=2, pin_memory=True, persistent_workers=True, drop_last=True)
     total_steps = train_cfg.epochs * len(train_loader)
     
     model     = NanoGPT(model_cfg).to(device)
@@ -331,13 +341,16 @@ if __name__ == '__main__':
     scheduler = get_lr_scheduler(optimizer, total_steps, train_cfg)
 
     start_step = 0
+    best_val_loss = float('inf')
     if args.load:
         ckpt_path = os.path.join(train_cfg.ckpt_dir, 'latest_model.pt')
         assert os.path.exists(ckpt_path), f'# 체크포인트 파일이 존재하지 않습니다: {ckpt_path}'
-        start_step, _ = load_checkpoint(ckpt_path, model, optimizer, scheduler, device)
+        start_step, best_val_loss = load_checkpoint(ckpt_path, model, optimizer, scheduler, device)
         print(f'# 체크포인트 로드 완료: Step {start_step}에서 재개합니다.')
 
+    # Compile시 Model이 래퍼로 감싸지면서 Key 앞에 _orig_mod라는 Prefix가 붙게 된다.
+    # 고로 Save와 Load할 때 Key에 주의!
     model = torch.compile(model)
 
-    train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg, start_step)
+    train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg, start_step, best_val_loss)
     _save_loss_plot(train_cfg.history_dir)
