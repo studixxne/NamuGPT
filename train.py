@@ -26,6 +26,7 @@ class TrainConfig:
     ckpt_dir:      str        = 'checkpoints'   # CheckPoint 파일 저장할 Dir 위치
     history_dir:   str        = 'histories'     # Loss History를 기록할 Dir 위치
     val_ratio:     float      = 0.005           # Validation 데이터에 사용할 비율
+    grad_accum:    int        = 4               # Grad accumulation 횟수
     max_articles:  int | None = None            # int이거나 None (학습에 사용할 article의 개수)
 
 def configure_optimizer(model, train_cfg: TrainConfig):
@@ -206,7 +207,7 @@ def load_checkpoint(path, model, optimizer, scheduler, device):
 
 def _save_loss_plot(ckpt_dir):
     log_path = os.path.join(ckpt_dir, 'loss_log.json')
-    
+
     if not os.path.exists(log_path):
         return
     
@@ -266,23 +267,29 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
             # 혼합 정밀도 BF16을 사용함으로써 연산 최적화
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 _, loss = model(x, targets=y)
+                # grad_accum 만큼 나눠준다.
+                loss_item = loss.item()
+                loss = loss / train_cfg.grad_accum
 
-            optimizer.zero_grad()
+            # 미분값 누적
             loss.backward()
 
-            # 뒤에 _가 붙으면 inplace 연산
-            # loss가 튈 때 gradient가 폭발하여 학습이 망가질 수 있음으로 이를 방지하기 위해서 Grad Cliping 도입
-            # 만약 L2 Norm이 5.0 이라면 grad_clip이 1.0이므로 모든 기울기에 0.2를 곱함으로써 L2 Norm을 1로 맞춰준다
-            torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
-
-            optimizer.step()
-            scheduler.step()
+            # grad_accum만큼의 누적 횟수가 도달했을 때만 가중치를 업데이트한다.
+            # 이러한 방식을 통해서 VRAM이 부족한 상황에서도 더 큰 batch_size를 사용하는 것과 동일한 효과를 냄으로써 좀 더 Robust해지고 학습 효율 증가!
+            if (step+1) % train_cfg.grad_accum == 0:
+                # 뒤에 _가 붙으면 inplace 연산
+                # loss가 튈 때 gradient가 폭발하여 학습이 망가질 수 있음으로 이를 방지하기 위해서 Grad Cliping 도입
+                # 만약 L2 Norm이 5.0 이라면 grad_clip이 1.0이므로 모든 기울기에 0.2를 곱함으로써 L2 Norm을 1로 맞춰준다
+                torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)    
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
 
             step += 1
             if step % train_cfg.log_interval == 0:
                 current_lr = scheduler.get_last_lr()[0]
-                train_log.append((step, loss.item()))
-                tqdm.write(f'epoch [{epoch+1}|{train_cfg.epochs}] | step [{step}|{total_steps}] | loss {loss.item():.4f} | current_lr {current_lr:.2e}')
+                train_log.append((step, loss_item))
+                tqdm.write(f'epoch [{epoch+1}|{train_cfg.epochs}] | step [{step}|{total_steps}] | loss {loss_item:.4f} | current_lr {current_lr:.2e}')
 
             # 일정 주기로 일반화 성능을 체크하기 위해 val_loss 계산 및 출력
             if step % train_cfg.eval_interval == 0:
@@ -338,7 +345,7 @@ if __name__ == '__main__':
     
     model     = NanoGPT(model_cfg).to(device)
     optimizer = configure_optimizer(model, train_cfg)
-    scheduler = get_lr_scheduler(optimizer, total_steps, train_cfg)
+    scheduler = get_lr_scheduler(optimizer, total_steps // train_cfg.grad_accum, train_cfg)
 
     start_step = 0
     best_val_loss = float('inf')
