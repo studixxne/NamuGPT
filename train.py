@@ -18,7 +18,7 @@ class TrainConfig:
     max_lr:        float      = 6e-4            # Learning Rate
     weight_decay:  float      = 0.1             # Weight Decay 강도    
     betas:         tuple      = (0.9, 0.95)     # AdamW beta 설정
-    warmup_steps:  int        = 2000            # warmup step 횟수
+    warmup_steps:  int        = 500             # warmup step 횟수
     min_lr_ratio:  float      = 0.1             # 최소로 보장되는 학습 비율 (ratio * lr이 최종 학습률)
     grad_clip:     float      = 1.0             # Gradient Cliping 기준
     log_interval:  int        = 50              # 로그 기록 간격
@@ -175,7 +175,7 @@ def evaluate(model, val_loader, device):
     total_loss, cnt = 0.0, 0
 
     for x, y in val_loader:
-        x, y = x.to(device), y.to(device)
+        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
         with torch.autocast('cuda', dtype=torch.bfloat16):
             _, loss = model(x, targets=y)
         total_loss += loss.item()
@@ -262,13 +262,13 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
     print(f'# Training Start')
     for epoch in tqdm(range(start_epoch, train_cfg.epochs)):
         for x, y in train_loader:
+            step += 1
             x, y = x.to(device), y.to(device)
 
             # 혼합 정밀도 BF16을 사용함으로써 연산 최적화
             with torch.autocast('cuda', dtype=torch.bfloat16):
                 _, loss = model(x, targets=y)
                 # grad_accum 만큼 나눠준다.
-                loss_item = loss.item()
                 loss = loss / train_cfg.grad_accum
 
             # 미분값 누적
@@ -276,7 +276,7 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
 
             # grad_accum만큼의 누적 횟수가 도달했을 때만 가중치를 업데이트한다.
             # 이러한 방식을 통해서 VRAM이 부족한 상황에서도 더 큰 batch_size를 사용하는 것과 동일한 효과를 냄으로써 좀 더 Robust해지고 학습 효율 증가!
-            if (step+1) % train_cfg.grad_accum == 0:
+            if step % train_cfg.grad_accum == 0:
                 # 뒤에 _가 붙으면 inplace 연산
                 # loss가 튈 때 gradient가 폭발하여 학습이 망가질 수 있음으로 이를 방지하기 위해서 Grad Cliping 도입
                 # 만약 L2 Norm이 5.0 이라면 grad_clip이 1.0이므로 모든 기울기에 0.2를 곱함으로써 L2 Norm을 1로 맞춰준다
@@ -285,15 +285,17 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
                 scheduler.step()
                 optimizer.zero_grad()
 
-            step += 1
             if step % train_cfg.log_interval == 0:
                 current_lr = scheduler.get_last_lr()[0]
-                train_log.append((step, loss_item))
-                tqdm.write(f'epoch [{epoch+1}|{train_cfg.epochs}] | step [{step}|{total_steps}] | loss {loss_item:.4f} | current_lr {current_lr:.2e}')
+                train_log.append((step, loss.item() * train_cfg.grad_accum))
+                tqdm.write(f'epoch [{epoch+1}|{train_cfg.epochs}] | step [{step}|{total_steps}] | loss {loss.item() * train_cfg.grad_accum:.4f} | current_lr {current_lr:.2e}')
 
             # 일정 주기로 일반화 성능을 체크하기 위해 val_loss 계산 및 출력
             if step % train_cfg.eval_interval == 0:
                 save_model(step)
+
+        if step % train_cfg.grad_accum != 0:
+            optimizer.zero_grad()
 
         save_model(step)
 
@@ -301,6 +303,10 @@ if __name__ == '__main__':
     import argparse
     from datasets import load_dataset
     from model import NanoGPT, GPTConfig
+
+    # FP32 데이터의 행렬 곱셈 연산 방식을 TF32로 변경함으로써 최적화
+    # 소수점 일부 반올림함으로써 가속 연산!
+    torch.set_float32_matmul_precision('high')
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--load', action='store_true', help='latest_model.pt에서 학습 재개')
@@ -358,6 +364,14 @@ if __name__ == '__main__':
     # Compile시 Model이 래퍼로 감싸지면서 Key 앞에 _orig_mod라는 Prefix가 붙게 된다.
     # 고로 Save와 Load할 때 Key에 주의!
     model = torch.compile(model)
+
+    param_set = set(p for p in model.parameters() if p.requires_grad)
+    n_params = sum(p.numel() for p in param_set)
+    print(f'# Model Parameter: {n_params/1e6:.1f}M')
+    print(f'# Total training steps: {total_steps}')
+    print(f'# Tokens per step: {train_cfg.batch_size * model_cfg.block_size:,}')
+    print(f'# Tokens per update: {train_cfg.grad_accum * train_cfg.batch_size * model_cfg.block_size:,}')
+    print(f'# Total training tokens: {total_steps * train_cfg.batch_size * model_cfg.block_size / 1e9:.2f}B')    
 
     train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg, start_step, best_val_loss)
     _save_loss_plot(train_cfg.history_dir)
