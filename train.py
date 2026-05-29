@@ -11,6 +11,8 @@ from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizerFast
 from tqdm import tqdm
 
+from utils import get_device, autocast_ctx
+
 @dataclass
 class TrainConfig:
     batch_size:    int        = 32              # Batch Size
@@ -29,7 +31,7 @@ class TrainConfig:
     grad_accum:    int        = 4               # Grad accumulation 횟수
     max_articles:  int | None = None            # int이거나 None (학습에 사용할 article의 개수)
 
-def configure_optimizer(model, train_cfg: TrainConfig):
+def configure_optimizer(model, train_cfg: TrainConfig, device):
     """
     [GPT를 더 효율적으로 학습하기 위해 Optimizer를 설정]
 
@@ -72,7 +74,7 @@ def configure_optimizer(model, train_cfg: TrainConfig):
     # 만약 CUDA 연산이 가능하다면 Kernel Fusion을 적용한다.
     # Kernel Fusion은 필요한 연산들을 하나의 커널로 통합해서 GPU에서의 VRAM과 코어 사이의 이동 횟수를 줄여주는 하드웨어 최적화 기법이다.
     # 트레이드 오프 없이 효율성 증대가 크기 때문에 사용이 가능하다면 반드시 사용하는 것이 좋다!
-    use_fused = torch.cuda.is_available()
+    use_fused = (device == 'cuda')
     optimizer = torch.optim.AdamW(param_groups, lr=train_cfg.max_lr, betas=train_cfg.betas, fused=use_fused)
     return optimizer
 
@@ -176,7 +178,7 @@ def evaluate(model, val_loader, device):
 
     for x, y in val_loader:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        with torch.autocast('cuda', dtype=torch.bfloat16):
+        with autocast_ctx(device):
             _, loss = model(x, targets=y)
         total_loss += loss.item()
         cnt += 1
@@ -265,8 +267,8 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
             step += 1
             x, y = x.to(device), y.to(device)
 
-            # 혼합 정밀도 BF16을 사용함으로써 연산 최적화
-            with torch.autocast('cuda', dtype=torch.bfloat16):
+            # 혼합 정밀도 BF16을 사용함으로써 연산 최적화 (CUDA만 적용)
+            with autocast_ctx(device):
                 _, loss = model(x, targets=y)
                 # grad_accum 만큼 나눠준다.
                 loss = loss / train_cfg.grad_accum
@@ -321,25 +323,31 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     # *=============================================*
-    device    = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device    = get_device()
     model_cfg = GPTConfig()
     train_cfg = TrainConfig()
     # *=============================================*
 
+    # Hyper Parameter 적용
     for key, val in vars(args).items():
         if key != 'load' and val is not None and hasattr(train_cfg, key):
             setattr(train_cfg, key, val)
 
+    # Tokenizer 초기화
     tokenizer = PreTrainedTokenizerFast.from_pretrained(
         'skt/kogpt2-base-v2',
         bos_token='</s>', eos_token='</s>', unk_token='<unk>',
         pad_token='<pad>', mask_token='<mask>'
     )
 
+    # Token Cache 경로 생성
     cache_dir = 'token_cache'
     os.makedirs(cache_dir, exist_ok=True)
     articles_num = 'full' if train_cfg.max_articles is None else train_cfg.max_articles
     token_cache_path = f"token_cache/tokens_{articles_num}.pt"
+
+    # 만약 Token Cache가 존재한다면 cache를 불러온다.
+    # 존재하지 않는 경우에는 Tokinizing 수행 후, Torch Tensor로 변환 후 Cache로 저장
     if os.path.exists(token_cache_path):
         tokens = torch.load(token_cache_path)
     else:
@@ -347,6 +355,7 @@ if __name__ == '__main__':
         tokens = build_corpus(wiki, tokenizer, max_articles=train_cfg.max_articles)
         torch.save(tokens, token_cache_path)
 
+    # val_ratio 만큼 train/val 데이터 분할
     split = int(len(tokens) * (1 - train_cfg.val_ratio))
     train_tokens = tokens[:split]
     val_tokens = tokens[split:]
@@ -355,16 +364,19 @@ if __name__ == '__main__':
 
     # pin_memory와 persistent_workers를 True로 설정함으로써 고속 메모리 구역에 고정시키고 프로세스를 유지함으로써 성능 개선
     # drop_last를 True로 설정함으로써 자투리 Batch 버린다. 이를 통해 Shape의 크기가 변하면서 발생할 수 있는 에러나 비효율성 예방
+    pin_memory = (device == 'cuda')
     train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True,
-                              num_workers=4, pin_memory=True, persistent_workers=True, drop_last=True)
+                              num_workers=4, pin_memory=pin_memory, persistent_workers=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=train_cfg.batch_size, shuffle=False,
-                            num_workers=2, pin_memory=True, persistent_workers=True, drop_last=True)
+                            num_workers=2, pin_memory=pin_memory, persistent_workers=True, drop_last=True)
     total_steps = train_cfg.epochs * len(train_loader)
     
+    # Model, Optimizer, Scheduler 생성
     model     = NanoGPT(model_cfg).to(device)
-    optimizer = configure_optimizer(model, train_cfg)
+    optimizer = configure_optimizer(model, train_cfg, device)
     scheduler = get_lr_scheduler(optimizer, total_steps // train_cfg.grad_accum, train_cfg)
 
+    # Model Checkpoint Load
     start_step = 0
     best_val_loss = float('inf')
     if args.load:
@@ -373,10 +385,13 @@ if __name__ == '__main__':
         start_step, best_val_loss = load_checkpoint(ckpt_path, model, optimizer, scheduler, device)
         print(f'# 체크포인트 로드 완료: Step {start_step}에서 재개합니다.')
 
+    # 모델 Compile, 학습 최적화
     # Compile시 Model이 래퍼로 감싸지면서 Key 앞에 _orig_mod라는 Prefix가 붙게 된다.
     # 고로 Save와 Load할 때 Key에 주의!
-    model = torch.compile(model)
+    if device == 'cuda':
+        model = torch.compile(model)
 
+    # Parameter, Token 크기 체크
     param_set = set(p for p in model.parameters() if p.requires_grad)
     n_params = sum(p.numel() for p in param_set)
     print(f'# Model Parameter: {n_params/1e6:.1f}M')
@@ -385,5 +400,8 @@ if __name__ == '__main__':
     print(f'# Tokens per update: {train_cfg.grad_accum * train_cfg.batch_size * model_cfg.block_size:,}')
     print(f'# Total training tokens: {total_steps * train_cfg.batch_size * model_cfg.block_size / 1e9:.2f}B')    
 
+    # 학습 시작
     train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg, start_step, best_val_loss)
+
+    # Loss graph 생성
     _save_loss_plot(train_cfg.history_dir)
