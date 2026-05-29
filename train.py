@@ -3,15 +3,12 @@ import math
 import os
 import numpy as np
 import torch
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizerFast
 from tqdm import tqdm
 
-from utils import get_device, autocast_ctx
+from utils import (get_device, autocast_ctx, save_loss_plot)
 
 @dataclass
 class TrainConfig:
@@ -24,12 +21,13 @@ class TrainConfig:
     min_lr_ratio:  float      = 0.1             # 최소로 보장되는 학습 비율 (ratio * lr이 최종 학습률)
     grad_clip:     float      = 1.0             # Gradient Cliping 기준
     log_interval:  int        = 50              # 로그 기록 간격
-    eval_interval: int        = 1000            # Evaluation 간격
+    eval_interval: int        = 100             # Evaluation 간격
     ckpt_dir:      str        = 'checkpoints'   # CheckPoint 파일 저장할 Dir 위치
     history_dir:   str        = 'histories'     # Loss History를 기록할 Dir 위치
     val_ratio:     float      = 0.005           # Validation 데이터에 사용할 비율
     grad_accum:    int        = 4               # Grad accumulation 횟수
     max_articles:  int | None = None            # int이거나 None (학습에 사용할 article의 개수)
+    train_type:    str        = 'pt'            # 학습 유형 표시
 
 def configure_optimizer(model, train_cfg: TrainConfig, device):
     """
@@ -207,30 +205,6 @@ def load_checkpoint(path, model, optimizer, scheduler, device):
     scheduler.load_state_dict(check_point['scheduler_state_dict'])
     return check_point['step'], check_point['val_loss']
 
-def _save_loss_plot(ckpt_dir):
-    log_path = os.path.join(ckpt_dir, 'loss_log.json')
-
-    if not os.path.exists(log_path):
-        return
-    
-    with open(log_path) as f:
-        logs = json.load(f)
-    train_log = logs['train']
-    val_log   = logs['val']
-
-    fig, ax = plt.subplots()
-    if train_log:
-        steps, losses = zip(*train_log)
-        ax.plot(steps, losses, label='train')
-    if val_log:
-        steps, losses = zip(*val_log)
-        ax.plot(steps, losses, label='val')
-    ax.set_xlabel('step')
-    ax.set_ylabel('loss')
-    ax.legend()
-    fig.savefig(os.path.join(ckpt_dir, 'loss.png'))
-    plt.close(fig)
-
 def train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg: TrainConfig, start_step=0, start_val_loss=float('inf')):
     model.train()
     step = start_step
@@ -248,17 +222,18 @@ def train(model, train_loader, val_loader, optimizer, scheduler, device, total_s
         val_log.append((current_step, val_loss))
 
         os.makedirs(train_cfg.history_dir, exist_ok=True)
-        with open(os.path.join(train_cfg.history_dir, 'loss_log.json'), 'w') as f:
+        file_name = train_cfg.train_type + '_loss.json'
+        with open(os.path.join(train_cfg.history_dir, file_name), 'w') as f:
             json.dump({'train': train_log, 'val': val_log}, f)
 
         # 최고 성능 모델 저장
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'best_model.pt'),
+            save_checkpoint(os.path.join(train_cfg.ckpt_dir, train_cfg.train_type + '_best_model.pt'),
                             model, optimizer, scheduler, current_step, best_val_loss, train_cfg)
 
         # 최신 모델 저장
-        save_checkpoint(os.path.join(train_cfg.ckpt_dir, 'latest_model.pt'),
+        save_checkpoint(os.path.join(train_cfg.ckpt_dir, train_cfg.train_type + '_latest_model.pt'),
                         model, optimizer, scheduler, current_step, best_val_loss, train_cfg)
 
     print(f'# Training Start')
@@ -311,7 +286,7 @@ if __name__ == '__main__':
     torch.set_float32_matmul_precision('high')
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--load',          action='store_true', help='latest_model.pt에서 학습 재개')
+    parser.add_argument('--load',          action='store_true', help='pt_latest_model.pt에서 학습 재개')
     parser.add_argument('--batch_size',    type=int,   default=None)
     parser.add_argument('--epochs',        type=int,   default=None)
     parser.add_argument('--grad_accum',    type=int,   default=None)
@@ -380,7 +355,7 @@ if __name__ == '__main__':
     start_step = 0
     best_val_loss = float('inf')
     if args.load:
-        ckpt_path = os.path.join(train_cfg.ckpt_dir, 'latest_model.pt')
+        ckpt_path = os.path.join(train_cfg.ckpt_dir, train_cfg.train_type + '_latest_model.pt')
         assert os.path.exists(ckpt_path), f'# 체크포인트 파일이 존재하지 않습니다: {ckpt_path}'
         start_step, best_val_loss = load_checkpoint(ckpt_path, model, optimizer, scheduler, device)
         print(f'# 체크포인트 로드 완료: Step {start_step}에서 재개합니다.')
@@ -404,4 +379,4 @@ if __name__ == '__main__':
     train(model, train_loader, val_loader, optimizer, scheduler, device, total_steps, train_cfg, start_step, best_val_loss)
 
     # Loss graph 생성
-    _save_loss_plot(train_cfg.history_dir)
+    save_loss_plot(train_cfg.history_dir, 'pt_loss.json')
