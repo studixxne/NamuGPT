@@ -339,11 +339,13 @@ if __name__ == '__main__':
 
     # pin_memory와 persistent_workers를 True로 설정함으로써 고속 메모리 구역에 고정시키고 프로세스를 유지함으로써 성능 개선
     # drop_last를 True로 설정함으로써 자투리 Batch 버린다. 이를 통해 Shape의 크기가 변하면서 발생할 수 있는 에러나 비효율성 예방
-    pin_memory = (device == 'cuda')
+    pin_memory  = (device == 'cuda')
+    num_workers = 4 if device == 'cuda' else 0
+    persistent  = (num_workers > 0)
     train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True,
-                              num_workers=4, pin_memory=pin_memory, persistent_workers=True, drop_last=True)
+                              num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=train_cfg.batch_size, shuffle=False,
-                            num_workers=2, pin_memory=pin_memory, persistent_workers=True, drop_last=True)
+                            num_workers=num_workers-2, pin_memory=pin_memory, persistent_workers=persistent, drop_last=True)
     total_steps = train_cfg.epochs * len(train_loader)
     
     # Model, Optimizer, Scheduler 생성
