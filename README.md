@@ -31,6 +31,21 @@
 
 ### Loss
 
-![loss](histories/loss.png)
+![pt_loss](histories/pt_loss.png)
 
 ---
+
+## Instruction Tuning (SFT)
+
+| Hyperparameter | Value |
+|---|---|
+| Dataset | beomi/KoAlpaca-v1.1a |
+| Total steps | 3,768 |
+| Batch size | 32,768 tokens/update|
+| Optimizer | AdamW (fused) |
+| Learning Rate | 6e-5 |
+| Mixed Precision | BF16 |
+
+### Loss
+
+![sft_loss](histories/sft_loss.png)
