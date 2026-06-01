@@ -137,7 +137,7 @@ if __name__ == '__main__':
     train_loader = DataLoader(train_dataset, batch_size=train_cfg.batch_size, shuffle=True,
                               num_workers=num_workers, pin_memory=pin_memory, persistent_workers=persistent, drop_last=True)
     val_loader   = DataLoader(val_dataset,   batch_size=train_cfg.batch_size, shuffle=False,
-                              num_workers=num_workers-2, pin_memory=pin_memory, persistent_workers=persistent, drop_last=True)
+                              num_workers=max(num_workers-2, 0), pin_memory=pin_memory, persistent_workers=persistent, drop_last=True)
 
     # Optimizer, Scheduler 초기화
     total_steps  = train_cfg.epochs * len(train_loader)
