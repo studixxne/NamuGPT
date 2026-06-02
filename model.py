@@ -148,20 +148,39 @@ class NanoGPT(nn.Module):
         return logits, loss
     
     @torch.no_grad()
-    def generate(self, tokens, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, tokens, max_new_tokens, repetition_penalty=1.1, temperature=1.0, top_k=None, top_p=None):
         """
         tokens: (b, n) - 프롬프트 토큰 인덱스
         max_new_tokens: int -> 새로 생성될 수 있는 최대 토큰 개수
         temperature: float -> 낮을수록 Greedy와 가까워지고 높아질수록 다양성 증가
         top_k: int -> 계산된 확률의 상위 k개의 토큰만 후보로 남기고 최종적으로 토큰을 선정함
+        top_p: float -> 누적 p% 까지만의 토큰을 후보로 남기고 최종적으로 해당 후보들에 대해서 토큰을 선정함
         """
 
-        for _ in range(max_new_tokens):
+        prompt_len = tokens.shape[1]
+
+        def get_logits(tokens):
             # Context Length가 Block Size를 초과하면 가장 최근의 토큰만 읽어냄
             tokens_cond = tokens[:, -self.config.block_size:]
 
-            logits, _ = self(tokens_cond)           # (b, 1, vocab_size)
-            logits = logits[:, -1, :] / temperature # (b, vocab_size)
+            logits, _ = self(tokens_cond) # (b, 1, vocab_size)
+            logits = logits[:, -1, :] # (b, vocab_size)
+
+            if repetition_penalty != 1.0:
+                generated = tokens[:, prompt_len:]
+                penalty_logits = logits.gather(-1, generated)
+                penalty_logits = torch.where(
+                    penalty_logits > 0,
+                    penalty_logits / repetition_penalty,
+                    penalty_logits * repetition_penalty
+                )
+
+                logits.scatter_(-1, generated, penalty_logits)
+
+            return logits / temperature
+        
+        for _ in range(max_new_tokens):
+            logits = get_logits(tokens)
 
             # 상위 K개의 토큰만 선정할 수 있도록 하여 필요없는 꼬리 확률들의 단어들을 모두 잘라냄
             if top_k is not None:
@@ -173,6 +192,24 @@ class NanoGPT(nn.Module):
 
             # top_k에 속해있는 Vocab에 대해서만 확률 재정규화
             probs = F.softmax(logits, dim=-1)
+
+            if top_p is not None:
+                # 확률 내림차순 정렬
+                sorted_probs, sorted_idx = torch.sort(probs, dim=-1, descending=True)
+                cumsum = torch.cumsum(sorted_probs, dim=-1)
+
+                # top_p를 이미 달성한 시점부터의 토큰들은 제거
+                remove_mask = (cumsum - sorted_probs) >= top_p
+                remove_mask[:, 0] = False # 확률 가장 높은 토큰은 반드시 포함
+                sorted_probs[remove_mask] = 0.0
+
+                # 원래 vocab 순서로 되돌린 뒤 재정규화
+                # scatter는 (dim, idx, src)로 src의 값을 idx 위치에 배치하는 것
+                # sort의 역연산이 scatter와 동일
+                # _ 붙으면 in_place 연산
+                probs = torch.zeros_like(probs).scatter_(1, sorted_idx, sorted_probs)
+                probs = probs / probs.sum(dim=-1, keepdim=True)
+
             # probs에 기반하여 1개 샘플링
             new_token = torch.multinomial(probs, num_samples=1)  # (b, 1)
             # 새로 샘플링한 토큰과 누적된 토큰을 concat 해줌
