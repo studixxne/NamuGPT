@@ -33,14 +33,16 @@ with open(config_path) as f:
     model_cfg = GPTConfig(**json.load(f))
 
 model = NanoGPT(model_cfg).to(device)
-model.load_state_dict(load_file(weights_path, device=str(device)))
+loaded_state_dict = load_file(weights_path, device=device)
+loaded_state_dict["token_embed.weight"] = loaded_state_dict["lm_head.weight"] # Weight Tyning 적용
+model.load_state_dict(loaded_state_dict)
 model.eval()
 
-print('# Welmcome To NanuGPT-125M!')
-print('# 무엇을 알려드릴까요?')
+print('🌱 Welcome To NanuGPT-125M!\n')
+print(f'☘️  NanuGPT: 무엇을 알려드릴까요?\n')
 
 while True:
-    prompt = input('user: ').strip()
+    prompt = input('👤 user: ').strip()
 
     if not prompt:
         continue
@@ -60,4 +62,4 @@ while True:
     if '</s>' in answer:
         answer = answer.split('</s>')[0].strip()
 
-    print(f'NanuGPT: {answer}\n')
+    print(f'\n☘️  NanuGPT: {answer}\n')
