@@ -10,7 +10,7 @@ from transformers import PreTrainedTokenizerFast
 from utils import get_device
 
 # * ============================================= *
-HF_REPO_ID         = 'hinagiku/NanuGPT-125M-Instruct'
+HF_REPO_ID         = 'hinagiku/NamuGPT-125M-Instruct'
 PROMPT_TEMPLATE    = '<|user|>{instruction}<|answer|>'
 MAX_NEW_TOKENS     = 200
 TEMPERATURE        = 0.8
@@ -38,8 +38,8 @@ loaded_state_dict["token_embed.weight"] = loaded_state_dict["lm_head.weight"] # 
 model.load_state_dict(loaded_state_dict)
 model.eval()
 
-print('🌱 Welcome To NanuGPT-125M!\n')
-print(f'☘️  NanuGPT: 무엇을 알려드릴까요?\n')
+print('🌱 Welcome To NamuGPT-125M!\n')
+print(f'☘️  NamuGPT: 무엇을 알려드릴까요?\n')
 
 while True:
     prompt = input('👤 user: ').strip()
@@ -62,4 +62,4 @@ while True:
     if '</s>' in answer:
         answer = answer.split('</s>')[0].strip()
 
-    print(f'\n☘️  NanuGPT: {answer}\n')
+    print(f'\n☘️  NamuGPT: {answer}\n')
