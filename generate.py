@@ -13,10 +13,10 @@ from utils import get_device
 HF_REPO_ID         = 'hinagiku/NamuGPT-125M-Instruct'
 PROMPT_TEMPLATE    = '<|user|>{instruction}<|answer|>'
 MAX_NEW_TOKENS     = 200
-TEMPERATURE        = 0.8
+TEMPERATURE        = 0.9
 TOP_K              = 80
 TOP_P              = 0.9
-REPETITION_PENALTY = 1.3
+REPETITION_PENALTY = 1.1
 # * ============================================= *
 
 device = get_device()
