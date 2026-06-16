@@ -44,13 +44,7 @@ pip install -r requirements.txt
 python generate.py
 ```
 
-
-## Training
-#### Hardward
-* **GPU:** NVIDIA GeForce RTX 4090 (1-way)
-
-
-### Model
+## Model
 | Parameter | Value |
 |---|---|
 | Total Parameter | 125.1M |
@@ -60,6 +54,12 @@ python generate.py
 | Context length | 1024 |
 | Vocab size | 51,200 (skt/kogpt2-base-v2) |
 
+
+## Training
+### Hardward
+* **GPU:** NVIDIA GeForce RTX 4090 (1-way)
+
+---
 
 ### Pre-training
 | Hyperparameter | Value |
@@ -72,10 +72,10 @@ python generate.py
 | LR Schedule | Warmup + Cosine Decay |
 | Mixed Precision | BF16 |
 
-
 #### Pre-training Loss Graph
 ![pt_loss](results/pt_loss.png)
 
+---
 
 ### Instruction Tuning (SFT)
 | Hyperparameter | Value |
@@ -86,7 +86,6 @@ python generate.py
 | Optimizer | AdamW (fused) |
 | Learning Rate | 6e-5 |
 | Mixed Precision | BF16 |
-
 
 #### SFT Loss Graph
 ![sft_loss](results/sft_loss.png)
