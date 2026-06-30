@@ -1,4 +1,4 @@
-# NamuGPT-125M-Instruct
+# 🌱  NamuGPT-125M-Instruct
 
 나무위키(Namuwiki) 데이터로 학습된 **한국어 NanoGPT2 모델**  
 **125M의 규모**로 사전학습을 진행했으며, 이후 SFT를 통해 **단발성 대화**를 진행할 수 있도록 파인튜닝되었습니다.
